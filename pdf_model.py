@@ -263,6 +263,25 @@ class PdfProject:
         self._change(lambda: self.doc.new_page(pno=position, width=width, height=height))
         return position
 
+    def insert_scanned_page(self, after_index: int, image: bytes) -> int:
+        """Place a feeder scan on a Letter page, replacing a pristine first page."""
+        if not image.startswith(b"\xff\xd8") or not image.endswith(b"\xff\xd9"):
+            raise ValueError("The scanner did not return a complete JPEG image.")
+        replace_first = self.path is None and not self.dirty and len(self.doc) == 1
+        position = 0 if replace_first else after_index + 1
+
+        def edit():
+            if replace_first:
+                page = self.doc[0]
+                page.set_mediabox(fitz.Rect(0, 0, 612, 792))
+            else:
+                page = self.doc.new_page(pno=position, width=612, height=792)
+            page.insert_image(fitz.Rect(0, 0, 612, 792), stream=image,
+                              keep_proportion=False)
+
+        self._change(edit)
+        return position
+
     def insert_pdf(self, after_index: int, path: str) -> int:
         source = fitz.open(path)
         try:

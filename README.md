@@ -14,6 +14,7 @@ Run `./install-desktop.sh` from a permanent checkout to add Folio PDF to the des
 - Click a picture to replace, extract, remove, move, or resize it.
 - Click a blank spot to place new text or a picture.
 - Use `+ Page` or `+ PDF` to insert pages. `More` contains page extraction, text extraction, and page deletion.
+- To scan from the HP LaserJet 200 color MFP M276nw, put a Letter page in its document feeder and click `Scan feeder`. Folio adds one 300 dpi color page to the open PDF. Click again for another page, then click `Save` or `Save As` to keep the result. This uses the printer on the local network and does not require a system scanner driver. If the printer's network name changes, set `FOLIO_SCANNER_URL` to its local scan service address (for example, `http://192.168.2.30:8289/`) before launching Folio.
 - Use `Scan OCR` to recognize text on a scanned page. `More → Make page searchable` adds an invisible selectable text layer to an image-only page. Exported text uses OCR automatically when a page has no embedded text.
 - Use `Save As` before modifying an important original. Undo and redo keep the most recent 20 changes during the session.
 

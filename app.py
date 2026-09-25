@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import threading
 import tomllib
 
 import cairo
@@ -17,6 +18,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk
 
 from pdf_model import PdfProject, PageItem
+from hp_scanner import scan_feeder_page
 
 
 def omarchy_colors() -> dict[str, str]:
@@ -106,6 +108,7 @@ class Folio(Gtk.Application):
         self.ocr_mode = False
         self.window = None
         self._closing = False
+        self._scanning = False
 
     def do_activate(self):
         if self.window:
@@ -156,6 +159,8 @@ class Folio(Gtk.Application):
         toolbar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         toolbar.append(button("+ Page", lambda *_: self._add_blank()))
         toolbar.append(button("+ PDF", lambda *_: self._choose_insert_pdf()))
+        self.scan_button = button("Scan feeder", lambda *_: self._start_feeder_scan())
+        toolbar.append(self.scan_button)
         toolbar.append(button("Scan OCR", lambda *_: self._scan_page()))
         spacer = Gtk.Box()
         spacer.set_hexpand(True)
@@ -558,6 +563,36 @@ class Folio(Gtk.Application):
             self.page_index = pos
             self.refresh()
 
+    def _start_feeder_scan(self):
+        if self._scanning:
+            return
+        self._scanning = True
+        self.scan_button.set_sensitive(False)
+        self._message("Scanning Letter page from HP feeder…")
+
+        def scan():
+            try:
+                image = scan_feeder_page()
+            except Exception as exc:
+                GLib.idle_add(self._finish_feeder_scan, None, str(exc))
+            else:
+                GLib.idle_add(self._finish_feeder_scan, image, None)
+
+        threading.Thread(target=scan, daemon=True).start()
+
+    def _finish_feeder_scan(self, image: bytes | None, error: str | None):
+        self._scanning = False
+        self.scan_button.set_sensitive(True)
+        if error:
+            self._message(error, error=True)
+            return False
+        pos = self._run(lambda: self.project.insert_scanned_page(self.page_index, image),
+                        "Scanned a Letter page. Save the PDF to keep it.", pages=True)
+        if pos is not None:
+            self.page_index = pos
+            self.refresh(pages=True)
+        return False
+
     def _delete_page(self):
         self._run(lambda: self.project.delete_page(self.page_index), "Deleted page", pages=True)
 
@@ -725,6 +760,9 @@ class Folio(Gtk.Application):
             self._message("Redid change")
 
     def _on_close_request(self, *_):
+        if self._scanning:
+            self._message("Wait for the scanner to finish before closing Folio PDF.")
+            return True
         if self._closing or not self.project.dirty:
             self.project.close()
             return False
