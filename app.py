@@ -5,11 +5,8 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-import re
-import subprocess
 import sys
 import threading
-import tomllib
 
 import cairo
 import gi
@@ -21,58 +18,46 @@ from pdf_model import PdfProject, PageItem
 from hp_scanner import scan_feeder_page
 
 
-def omarchy_colors() -> dict[str, str]:
-    fallback = {
-        "background": "#151821", "dark_background": "#10131b", "lighter_background": "#242936",
-        "foreground": "#e7e9ee", "dark_foreground": "#a5abb8", "accent": "#9bafff",
-        "selection": "#3b526f", "red": "#ec7979", "mode": "dark",
-    }
-    try:
-        name = subprocess.run(["omarchy", "theme", "current"], check=True, capture_output=True,
-                              text=True, timeout=3).stdout.strip()
-        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-        for root in (Path.home() / ".config/omarchy/themes", Path("/usr/share/omarchy/themes")):
-            palette = root / slug / "colors.toml"
-            if palette.is_file():
-                with palette.open("rb") as stream:
-                    return fallback | tomllib.load(stream)
-    except Exception:
-        pass
-    return fallback
+from editor_style import omarchy_colors, mix, fit_scale
 
 
-def apply_theme() -> None:
-    c = omarchy_colors()
+def apply_theme(provider, c):
+    muted = mix(c['background'], c['foreground'], .76)
+    border = mix(c['background'], c['foreground'], .18)
+    accent_text = "#101010" if sum(int(c['accent'][i:i+2], 16) * w for i, w in ((1, .299), (3, .587), (5, .114))) > 145 else "#ffffff"
+    selection_text = "#101010" if sum(int(c["selection"][i:i+2], 16) * w for i, w in ((1, .299), (3, .587), (5, .114))) > 145 else "#ffffff"
     css = f"""
     window, dialog {{ background: {c['background']}; color: {c['foreground']}; }}
     headerbar {{ background: {c['dark_background']}; color: {c['foreground']};
-                 border-bottom: 1px solid {c['lighter_background']}; box-shadow: none; }}
-    .toolbar, .statusbar {{ background: {c['dark_background']}; padding: 8px 12px;
-                             border-bottom: 1px solid {c['lighter_background']}; }}
-    .statusbar {{ border-top: 1px solid {c['lighter_background']}; border-bottom: none; }}
+                 min-height: 38px; border-bottom: 1px solid {border}; box-shadow: none; }}
+    .toolbar, .statusbar {{ background: {c['dark_background']}; padding: 5px 10px;
+                             border-bottom: 1px solid {border}; }}
+    .statusbar {{ border-top: 1px solid {border}; border-bottom: none; font-size: 12px; }}
     .side-panel {{ background: {c['dark_background']}; padding: 12px; }}
+    .pages-panel {{ border-right: 1px solid {border}; }}
+    .inspector-panel {{ border-left: 1px solid {border}; }}
     .canvas-back {{ background: {c['background']}; }}
-    .panel-title {{ font-weight: 800; letter-spacing: .05em; color: {c['dark_foreground']}; }}
-    .muted {{ color: {c['dark_foreground']}; }}
+    .paper {{ background: white; box-shadow: 0 3px 14px alpha(black, .3); }}
+    .panel-title {{ font-weight: 700; font-size: 12px; color: {c['foreground']}; }}
+    .document-title {{ font-weight: 600; }}
+    .muted {{ color: {muted}; }}
     button {{ background: {c['lighter_background']}; color: {c['foreground']};
-              border: 1px solid {c['lighter_background']}; border-radius: 7px;
-              padding: 6px 10px; box-shadow: none; }}
-    button:hover {{ border-color: {c['accent']}; }}
-    button:disabled {{ opacity: .45; }}
-    button.suggested-action {{ background: {c['accent']}; color: {c['dark_background']};
-                               border-color: {c['accent']}; font-weight: 700; }}
+              border: 1px solid transparent; border-radius: 5px;
+              min-height: 24px; padding: 3px 9px; box-shadow: none; }}
+    .toolbar button, .statusbar button {{ background: transparent; }}
+    button:hover {{ background: {c['lighter_background']}; border-color: {border}; }}
+    button:checked {{ color: {selection_text}; background: {c['selection']}; border-color: {c['accent']}; }}
+    button:disabled {{ opacity: .4; }}
+    button.suggested-action {{ background: {c['accent']}; color: {accent_text}; font-weight: 700; }}
     button.destructive-action {{ color: {c['red']}; }}
-    button.thumb {{ padding: 8px; background: transparent; border-color: transparent; }}
-    button.thumb.selected {{ background: {c['selection']}; border-color: {c['accent']}; }}
+    button.thumb {{ padding: 8px; background: transparent; border-color: {border}; }}
+    button.thumb.selected {{ color: {selection_text}; background: {c['selection']}; border-color: {c['accent']}; }}
     entry, textview, spinbutton {{ background: {c['lighter_background']}; color: {c['foreground']};
-                                  border: 1px solid {c['lighter_background']}; border-radius: 6px; }}
+                                  border: 1px solid {border}; border-radius: 5px; }}
     textview text {{ background: {c['lighter_background']}; color: {c['foreground']}; }}
-    scrollbar slider {{ background: {c['dark_foreground']}; border-radius: 8px; }}
+    scrollbar slider {{ background: {muted}; border-radius: 8px; }}
     """
-    provider = Gtk.CssProvider()
     provider.load_from_data(css.encode())
-    Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider,
-                                               Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
 
 def label(text: str, css_class: str | None = None, *, wrap: bool = False) -> Gtk.Label:
@@ -101,7 +86,10 @@ class Folio(Gtk.Application):
         super().__init__(application_id="dev.folio.PDF", flags=Gio.ApplicationFlags.HANDLES_OPEN)
         self.project = PdfProject()
         self.page_index = 0
-        self.scale = .9
+        self.scale = 1.0
+        self.zoom_mode = "page"
+        self._viewport = None
+        self._resize_source = 0
         self.items: list[PageItem] = []
         self.selected: PageItem | None = None
         self.click_point = (50.0, 50.0)
@@ -114,7 +102,12 @@ class Folio(Gtk.Application):
         if self.window:
             self.window.present()
             return
-        apply_theme()
+        self.colors = omarchy_colors()
+        self.theme_provider = Gtk.CssProvider()
+        apply_theme(self.theme_provider, self.colors)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.theme_provider,
+                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        GLib.timeout_add_seconds(2, self._check_theme)
         self._build_window()
         self._setup_actions()
         self.refresh(pages=True)
@@ -135,7 +128,8 @@ class Folio(Gtk.Application):
         self.window.set_child(root)
 
         header = Gtk.HeaderBar()
-        header.set_title_widget(label("FOLIO  /  PDF EDITOR", "panel-title"))
+        self.document_title = label("Untitled.pdf", "document-title")
+        header.set_title_widget(self.document_title)
         header.pack_start(button("Open", lambda *_: self._choose_open()))
         actions_menu = Gio.Menu()
         for title, action in [
@@ -153,9 +147,16 @@ class Folio(Gtk.Application):
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
         toolbar.add_css_class("toolbar")
         root.append(toolbar)
-        toolbar.append(button("Pages", lambda *_: self._toggle_pages()))
-        toolbar.append(button("‹", lambda *_: self._step_page(-1)))
-        toolbar.append(button("›", lambda *_: self._step_page(1)))
+        self.pages_button = Gtk.ToggleButton(label="Pages")
+        self.pages_button.set_active(True)
+        self.pages_button.connect("toggled", lambda *_: self._toggle_pages())
+        toolbar.append(self.pages_button)
+        self.previous_button = button("‹", lambda *_: self._step_page(-1))
+        self.previous_button.set_tooltip_text("Previous page")
+        self.next_button = button("›", lambda *_: self._step_page(1))
+        self.next_button.set_tooltip_text("Next page")
+        toolbar.append(self.previous_button)
+        toolbar.append(self.next_button)
         toolbar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         toolbar.append(button("+ Page", lambda *_: self._add_blank()))
         toolbar.append(button("+ PDF", lambda *_: self._choose_insert_pdf()))
@@ -169,10 +170,10 @@ class Folio(Gtk.Application):
         self.redo_button = button("Redo", lambda *_: self._redo())
         toolbar.append(self.undo_button)
         toolbar.append(self.redo_button)
-        toolbar.append(button("−", lambda *_: self._zoom(-.2)))
-        self.zoom_label = label("125%")
-        toolbar.append(self.zoom_label)
-        toolbar.append(button("+", lambda *_: self._zoom(.2)))
+        self.inspector_button = Gtk.ToggleButton(label="Inspector")
+        self.inspector_button.set_active(True)
+        self.inspector_button.connect("toggled", lambda b: self.inspector_revealer.set_reveal_child(b.get_active()))
+        toolbar.append(self.inspector_button)
 
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         body.set_vexpand(True)
@@ -180,15 +181,17 @@ class Folio(Gtk.Application):
 
         self.pages_revealer = Gtk.Revealer()
         self.pages_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
-        self.pages_revealer.set_reveal_child(False)
+        self.pages_revealer.set_reveal_child(True)
         body.append(self.pages_revealer)
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         left.add_css_class("side-panel")
-        left.set_size_request(170, -1)
+        left.add_css_class("pages-panel")
+        left.set_size_request(190, -1)
         self.pages_revealer.set_child(left)
         left.append(label("PAGES", "panel-title"))
         left_scroll = Gtk.ScrolledWindow()
         left_scroll.set_vexpand(True)
+        left_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         left.set_hexpand(False)
         left.append(left_scroll)
         self.thumbs = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -205,11 +208,15 @@ class Folio(Gtk.Application):
         body.append(self.canvas_scroll)
         self.canvas_holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.canvas_holder.set_halign(Gtk.Align.CENTER)
-        self.canvas_holder.set_valign(Gtk.Align.START)
-        self.canvas_holder.set_margin_top(24)
-        self.canvas_holder.set_margin_bottom(24)
+        self.canvas_holder.set_valign(Gtk.Align.CENTER)
+        self.canvas_holder.set_margin_top(20)
+        self.canvas_holder.set_margin_bottom(20)
+        self.canvas_holder.set_margin_start(20)
+        self.canvas_holder.set_margin_end(20)
         self.canvas_scroll.set_child(self.canvas_holder)
+        self.canvas_scroll.add_tick_callback(self._watch_viewport)
         self.overlay = Gtk.Overlay()
+        self.overlay.add_css_class("paper")
         self.canvas_holder.append(self.overlay)
         self.picture = Gtk.Picture()
         self.picture.set_can_shrink(False)
@@ -224,8 +231,12 @@ class Folio(Gtk.Application):
 
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         right.add_css_class("side-panel")
-        right.set_size_request(290, -1)
-        body.append(right)
+        right.add_css_class("inspector-panel")
+        right.set_size_request(260, -1)
+        self.inspector_revealer = Gtk.Revealer()
+        self.inspector_revealer.set_reveal_child(True)
+        self.inspector_revealer.set_child(right)
+        body.append(self.inspector_revealer)
         right.append(label("INSPECTOR", "panel-title"))
         right_scroll = Gtk.ScrolledWindow()
         right_scroll.set_vexpand(True)
@@ -241,7 +252,16 @@ class Folio(Gtk.Application):
         self.page_status = label("")
         self.page_status.set_hexpand(True)
         self.page_status.set_xalign(1)
+        self.page_status.set_margin_end(18)
         status_box.append(self.page_status)
+        for title, mode in (("Fit page", "page"), ("Fit width", "width")):
+            control = button(title, lambda _b, m=mode: self._set_zoom_mode(m))
+            control.set_tooltip_text("Automatically resize the page with the window")
+            status_box.append(control)
+        status_box.append(button("−", lambda *_: self._zoom(-.2)))
+        self.zoom_label = label("100%")
+        status_box.append(self.zoom_label)
+        status_box.append(button("+", lambda *_: self._zoom(.2)))
 
     def _setup_actions(self):
         for name, method, shortcut in [
@@ -254,6 +274,8 @@ class Folio(Gtk.Application):
             ("extract-text", self._choose_extract_text, None),
             ("delete-page", self._delete_page, None),
             ("searchable", self._make_searchable, None),
+            ("fit-page", lambda: self._set_zoom_mode("page"), "<Primary>0"),
+            ("fit-width", lambda: self._set_zoom_mode("width"), "<Primary><Shift>0"),
         ]:
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", lambda _action, _param, fn=method: fn())
@@ -262,7 +284,7 @@ class Folio(Gtk.Application):
                 self.set_accels_for_action(f"app.{name}", [shortcut])
 
     def _toggle_pages(self):
-        self.pages_revealer.set_reveal_child(not self.pages_revealer.get_reveal_child())
+        self.pages_revealer.set_reveal_child(self.pages_button.get_active())
 
     def _step_page(self, delta: int):
         index = max(0, min(self.page_index + delta, self.project.page_count - 1))
@@ -295,15 +317,7 @@ class Folio(Gtk.Application):
             self.items = self.project.items(self.page_index, ocr=self.ocr_mode)
             if self.ocr_mode:
                 self.items.extend(item for item in self.project.items(self.page_index) if item.kind == "image")
-            data, width, height = self.project.render(self.page_index, self.scale)
-            texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
-            self.picture.set_paintable(texture)
-            self.picture.set_size_request(width, height)
-            self.markup.set_size_request(width, height)
-            self.markup.set_content_width(width)
-            self.markup.set_content_height(height)
-            self.overlay.set_size_request(width, height)
-            self.markup.queue_draw()
+            self._render_page()
             if pages:
                 self._refresh_thumbs()
             else:
@@ -311,9 +325,11 @@ class Folio(Gtk.Application):
             self._refresh_inspector()
             self.undo_button.set_sensitive(self.project.can_undo)
             self.redo_button.set_sensitive(self.project.can_redo)
-            self.zoom_label.set_text(f"{round(self.scale * 100)}%")
+            self.previous_button.set_sensitive(self.page_index > 0)
+            self.next_button.set_sensitive(self.page_index < self.project.page_count - 1)
             self.page_status.set_text(f"Page {self.page_index + 1} of {self.project.page_count}")
-            filename = self.project.path.name if self.project.path else "Untitled"
+            filename = self.project.path.name if self.project.path else "Untitled.pdf"
+            self.document_title.set_text(f"{filename}{' •' if self.project.dirty else ''}")
             self.window.set_title(f"Folio PDF · {filename}{' •' if self.project.dirty else ''}")
         except Exception as exc:
             self._message(str(exc), error=True)
@@ -322,11 +338,13 @@ class Folio(Gtk.Application):
         clear_box(self.thumbs)
         for index in range(self.project.page_count):
             outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-            data, _, _ = self.project.render(index, .23)
+            page_width, page_height = self.project.page_size(index)
+            data, _, _ = self.project.render(index, min(132 / page_width, 172 / page_height))
             texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
             preview = Gtk.Picture.new_for_paintable(texture)
             preview.set_can_shrink(True)
-            preview.set_size_request(135, 170)
+            preview.set_halign(Gtk.Align.CENTER)
+            preview.set_size_request(132, min(172, round(page_height * 132 / page_width)))
             outer.append(preview)
             number = Gtk.Label(label=f"{index + 1:02d}")
             outer.append(number)
@@ -359,11 +377,13 @@ class Folio(Gtk.Application):
         if self.selected is None:
             return
         x0, y0, x1, y1 = self.selected.rect
-        cr.set_source_rgba(.98, .55, .2, .16)
+        accent = Gdk.RGBA()
+        accent.parse(self.colors['accent'])
+        cr.set_source_rgba(accent.red, accent.green, accent.blue, .16)
         cr.rectangle(x0 * self.scale, y0 * self.scale, (x1 - x0) * self.scale,
                      (y1 - y0) * self.scale)
         cr.fill_preserve()
-        cr.set_source_rgba(.98, .55, .2, .95)
+        cr.set_source_rgba(accent.red, accent.green, accent.blue, .95)
         cr.set_line_width(2)
         cr.stroke()
 
@@ -386,6 +406,10 @@ class Folio(Gtk.Application):
         view = Gtk.TextView()
         view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         view.set_size_request(-1, height)
+        view.set_left_margin(10)
+        view.set_right_margin(10)
+        view.set_top_margin(10)
+        view.set_bottom_margin(10)
         view.get_buffer().set_text(content)
         return view
 
@@ -741,9 +765,56 @@ class Folio(Gtk.Application):
         except Exception as exc:
             self._message(str(exc), error=True)
 
+    def _check_theme(self):
+        colors = omarchy_colors()
+        if colors != self.colors:
+            self.colors = colors
+            apply_theme(self.theme_provider, colors)
+            self.markup.queue_draw()
+        return True
+
+    def _watch_viewport(self, widget, _clock):
+        viewport = (widget.get_width(), widget.get_height())
+        if viewport != self._viewport:
+            self._viewport = viewport
+            if self.zoom_mode != "manual":
+                if self._resize_source:
+                    GLib.source_remove(self._resize_source)
+                self._resize_source = GLib.timeout_add(100, self._resize_page)
+        return True
+
+    def _resize_page(self):
+        self._resize_source = 0
+        if self.zoom_mode != "manual":
+            self._render_page()
+        return False
+
+    def _render_page(self):
+        if self.zoom_mode != "manual":
+            viewport = (self.canvas_scroll.get_width(), self.canvas_scroll.get_height())
+            if min(viewport) > 40:
+                self.scale = fit_scale(self.project.page_size(self.page_index), viewport, self.zoom_mode)
+        data, width, height = self.project.render(self.page_index, self.scale)
+        texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+        self.picture.set_paintable(texture)
+        self.picture.set_size_request(width, height)
+        self.markup.set_size_request(width, height)
+        self.markup.set_content_width(width)
+        self.markup.set_content_height(height)
+        self.overlay.set_size_request(width, height)
+        self.markup.queue_draw()
+        self.zoom_label.set_text(f"{round(self.scale * 100)}%")
+        self.zoom_label.set_tooltip_text({"page": "Fit page", "width": "Fit width", "manual": "Manual zoom"}[self.zoom_mode])
+
+    def _set_zoom_mode(self, mode):
+        self.zoom_mode = mode
+        self._render_page()
+
     def _zoom(self, change):
-        self.scale = max(.5, min(3.0, round(self.scale + change, 2)))
-        self.refresh()
+        self.zoom_mode = "manual"
+        self.scale = max(.1, min(4.0, round(self.scale + change, 2)))
+        # Resizing must never rebuild the inspector and discard a draft edit.
+        self._render_page()
 
     def _undo(self):
         if self.project.undo():

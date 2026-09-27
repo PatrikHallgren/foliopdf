@@ -8,6 +8,14 @@ The app targets Omarchy and other Arch Linux desktops with GTK 4, Python 3.11+, 
 
 Run `./install-desktop.sh` from a permanent checkout to add Folio PDF to the desktop launcher. The launcher points to that checkout, so keep it in place.
 
+## Workspace
+
+Pages automatically fit the available canvas when Folio opens, when the window is resized, and when switching pages. The page keeps its original proportions and PDF dimensions. Use **Fit width** for a larger reading/editing view with vertical scrolling, or **Fit page** to see the whole page. The **− / +** buttons switch to manual zoom (10–400%). Shortcuts: **Ctrl+0** fits the page; **Ctrl+Shift+0** fits the width.
+
+The page rail is visible by default. Toggle **Pages** or **Inspector** to make more room. The header shows the document name and an unsaved-change dot. Zooming and resizing preserve unfinished inspector text.
+
+Folio reads Omarchy’s active `colors.toml` from `$XDG_STATE_HOME/omarchy/current/theme` (normally `~/.local/state/omarchy/current/theme`), with support for the older `~/.config/omarchy/current/theme` location. Theme changes apply automatically within two seconds. UI surfaces, controls, and selection outlines use the palette; the PDF remains its original color. A built-in palette is used when Omarchy is unavailable.
+
 ## Edit
 
 - Click a word or number to change, remove, move, or resize only that text. Shift-click text to select its whole block.
