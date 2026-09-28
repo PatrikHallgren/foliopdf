@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import math
 import tempfile
 
 import pymupdf as fitz
@@ -230,6 +231,54 @@ class PdfProject:
             if remaining >= 0:
                 return
         raise ValueError("Text does not fit in this area. Shorten it or make the area larger.")
+
+    def add_signature(self, page_index: int, rect, strokes) -> None:
+        """Fit handwriting into a displayed-page rectangle, preserving its aspect ratio.
+
+        Ink is vector page content with no opaque background or external file.
+        This is a handwritten mark, not a certificate-based digital signature.
+        """
+        area = fitz.Rect(rect)
+        page = self.doc[page_index]
+        if (not all(math.isfinite(v) for v in area) or area.is_empty
+                or not page.rect.contains(area)):
+            raise ValueError("Keep the signature area inside the page.")
+        lines = [[(float(x), float(y)) for x, y in stroke] for stroke in strokes if stroke]
+        points = [point for stroke in lines for point in stroke]
+        if not points or not all(math.isfinite(v) for point in points for v in point):
+            raise ValueError("Draw a signature first.")
+        if not any(len(set(stroke)) > 1 for stroke in lines):
+            raise ValueError("Draw a signature first.")
+        # Padding includes the round pen caps, so ink cannot cross the page edge.
+        x0 = min(x for x, y in points) - 2
+        y0 = min(y for x, y in points) - 2
+        width = max(x for x, y in points) + 2 - x0
+        height = max(y for x, y in points) + 2 - y0
+        scale = min(area.width / width, area.height / height)
+
+        def edit():
+            page = self.doc[page_index]
+            rotation, derotation = page.rotation, page.derotation_matrix
+            # Build the shape with the unrotated crop transform. MuPDF's shape
+            # transform on rotated, offset crop boxes otherwise shifts the ink.
+            page.set_rotation(0)
+            try:
+                shape = page.new_shape()
+                for stroke in lines:
+                    mapped = [fitz.Point(area.x0 + (x - x0) * scale,
+                                         area.y0 + (y - y0) * scale) * derotation
+                              for x, y in stroke]
+                    if len(mapped) == 1:
+                        shape.draw_circle(mapped[0], scale)
+                        shape.finish(color=(0, 0, 0), fill=(0, 0, 0), width=0)
+                    else:
+                        shape.draw_polyline(mapped)
+                        shape.finish(color=(0, 0, 0), width=2 * scale,
+                                     lineCap=1, lineJoin=1, closePath=False)
+                shape.commit(overlay=True)
+            finally:
+                page.set_rotation(rotation)
+        self._change(edit)
 
     def add_image(self, page_index: int, rect: tuple[float, float, float, float], image_path: str) -> None:
         if not Path(image_path).is_file():

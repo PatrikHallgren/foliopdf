@@ -16,6 +16,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk
 
 from pdf_model import PdfProject, PageItem
 from hp_scanner import scan_feeder_page
+from signature_pad import SignaturePad
 
 
 from editor_style import omarchy_colors, mix, fit_scale
@@ -163,6 +164,7 @@ class Folio(Gtk.Application):
         self.scan_button = button("Scan feeder", lambda *_: self._start_feeder_scan())
         toolbar.append(self.scan_button)
         toolbar.append(button("Scan OCR", lambda *_: self._scan_page()))
+        toolbar.append(button("Sign", lambda *_: self._signature_dialog()))
         spacer = Gtk.Box()
         spacer.set_hexpand(True)
         toolbar.append(spacer)
@@ -717,6 +719,75 @@ class Folio(Gtk.Application):
         item = self.selected
         if item:
             self._run(lambda: self.project.replace_text(self.page_index, item.rect, ""), "Removed text")
+
+    def _signature_dialog(self):
+        dialog = Gtk.Dialog(title="Sign document", transient_for=self.window, modal=True)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        place = dialog.add_button("Place signature", Gtk.ResponseType.ACCEPT)
+        box = dialog.get_content_area()
+        box.set_spacing(10)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{side}")(16)
+        box.append(label("Move the pointer into the pad. Press Space to start drawing with one "
+                         "finger on your touchpad; press Space again to lift the pen. "
+                         "You can also click and drag. Leaving the pad stops drawing.", wrap=True))
+        status = label("", "muted")
+        def changed():
+            place.set_sensitive(any(len(set(s)) > 1 for s in pad.strokes))
+            status.set_text("Drawing — press Space to lift the pen" if pad.armed
+                            else "Pen lifted — press Space in the pad to draw")
+        pad = SignaturePad(changed)
+        box.append(pad)
+        box.append(status)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.append(button("Undo stroke", lambda *_: pad.undo()))
+        row.append(button("Clear", lambda *_: pad.clear()))
+        box.append(row)
+        box.append(label("Position starts at the last place you clicked on the page. "
+                         "Measurements are in PDF points (72 points = 1 inch).", "muted", wrap=True))
+        page_width, page_height = self.project.page_size(self.page_index)
+        x, y = self.click_point
+        fields = {}
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for name, value, maximum in (("X", min(x, page_width - 1), page_width - 1),
+                                     ("Y", min(y, page_height - 1), page_height - 1),
+                                     ("Width", min(180, page_width), page_width)):
+            control = Gtk.SpinButton.new_with_range(1 if name == "Width" else 0, maximum, 1)
+            control.set_value(value)
+            fields[name] = control
+            row.append(label(name))
+            row.append(control)
+        box.append(row)
+        box.append(label("The signature keeps its proportions and fits the remaining page area. "
+                         "Use Undo to remove it, then Save to keep it. "
+                         "This adds handwriting, not a digital certificate.", "muted", wrap=True))
+        # Capture the destination before opening a modal dialog.
+        project, page_index = self.project, self.page_index
+        def response(d, code):
+            if code != Gtk.ResponseType.ACCEPT:
+                d.destroy()
+                return
+            x, y = fields["X"].get_value(), fields["Y"].get_value()
+            width = min(fields["Width"].get_value(), page_width - x)
+            try:
+                project.add_signature(page_index, (x, y, x + width, page_height), pad.strokes)
+            except Exception as exc:
+                status.set_text(str(exc))
+                return
+            d.destroy()
+            self.selected = None
+            self.ocr_mode = False
+            self.refresh(pages=True)
+            self._message("Placed signature. Save the PDF to keep it; Undo removes it.")
+        child = box.get_first_child()
+        while child:
+            if isinstance(child, Gtk.Label):
+                child.set_max_width_chars(72)
+            child = child.get_next_sibling()
+        dialog.connect("response", response)
+        changed()
+        dialog.present()
+        pad.grab_focus()
 
     def _choose_add_image(self):
         self._dialog("Place picture", Gtk.FileChooserAction.OPEN, "Place",
